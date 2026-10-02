@@ -1,0 +1,263 @@
+// Prisma schema for the LinkedIn-integrated CRM
+// Run `npx prisma migrate dev` after setting DATABASE_URL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth / Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  passwordHash  String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  contacts      Contact[]
+  leads         Lead[]
+  tasks         Task[]
+  notes         Note[]
+  activities    Activity[]
+  integrations  Integration[]
+  syncLogs      SyncLog[]
+  linkedinPosts LinkedinPost[]
+
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------
+// CRM core
+// ---------------------------------------------------------------------------
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  PROPOSAL
+  WON
+  LOST
+}
+
+model Contact {
+  id             String     @id @default(cuid())
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name           String
+  email          String?
+  phone          String?
+  company        String?
+  jobTitle       String?
+  linkedinUrl    String?
+  leadStatus     LeadStatus @default(NEW)
+  leadSource     String?
+  tags           String[]   @default([])
+
+  notes          Note[]
+  tasks          Task[]
+  activities     Activity[]
+  leads          Lead[]
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([linkedinUrl])
+  @@index([leadStatus])
+  @@index([createdAt])
+}
+
+model Lead {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contactId    String
+  contact      Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  title        String
+  status       LeadStatus @default(NEW)
+  value        Decimal?   @db.Decimal(12, 2)
+  source       String?
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([contactId])
+  @@index([status])
+}
+
+model Activity {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contactId  String
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  type       String   // e.g. "call", "email", "meeting", "linkedin_message_logged"
+  summary    String
+  occurredAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([contactId])
+  @@index([occurredAt])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contactId String
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([contactId])
+}
+
+enum TaskStatus {
+  OPEN
+  DONE
+  CANCELLED
+}
+
+model Task {
+  id         String     @id @default(cuid())
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contactId  String?
+  contact    Contact?   @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  title       String
+  description String?
+  dueAt       DateTime?
+  status      TaskStatus @default(OPEN)
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([dueAt])
+}
+
+// ---------------------------------------------------------------------------
+// LinkedIn integration
+// ---------------------------------------------------------------------------
+
+enum IntegrationProvider {
+  MOCK
+  APIFY
+  LINKEDIN_OFFICIAL
+}
+
+// One row per connected LinkedIn "target" a user wants to track
+// (their own profile or a company page they're authorized to monitor).
+// Deliberately NOT a generic profile viewer: it only tracks targets the
+// user has explicitly configured for their own analytics use case.
+model Integration {
+  id             String              @id @default(cuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  provider       IntegrationProvider @default(MOCK)
+  targetType     String              @default("profile") // "profile" | "company"
+  targetUrl      String              // the authorized LinkedIn profile/company URL to sync
+  label          String?
+  isActive       Boolean             @default(true)
+
+  lastSyncedAt   DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  syncLogs       SyncLog[]
+  posts          LinkedinPost[]
+
+  @@index([userId])
+  @@index([targetUrl])
+  @@index([provider])
+}
+
+// Normalized post model — internal schema independent of provider.
+model LinkedinPost {
+  id                String      @id @default(cuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  integrationId     String
+  integration       Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  externalId        String      // provider's post ID — used for de-duplication
+  provider          IntegrationProvider
+
+  authorProfileUrl  String?
+  postUrl           String?
+  content           String?
+
+  publishedAt       DateTime?
+
+  // Metrics — nullable because not every provider/actor exposes every field.
+  impressions       Int?
+  views             Int?
+  reactions         Int?
+  comments          Int?
+  reposts           Int?
+  saves             Int?
+  clicks            Int?
+
+  // Calculated by our system, not the provider.
+  engagementRate    Float?
+
+  rawProviderData   Json?
+  fetchedAt         DateTime    @default(now())
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@unique([provider, externalId])
+  @@index([userId])
+  @@index([integrationId])
+  @@index([externalId])
+  @@index([provider])
+  @@index([publishedAt])
+}
+
+enum SyncStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+model SyncLog {
+  id               String       @id @default(cuid())
+  userId           String
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  integrationId    String?
+  integration      Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  provider         IntegrationProvider
+  syncType         String       // e.g. "posts", "profile", "company"
+  status           SyncStatus   @default(RUNNING)
+
+  startedAt        DateTime     @default(now())
+  completedAt      DateTime?
+  recordsProcessed Int          @default(0)
+  errorMessage     String?
+
+  @@index([userId])
+  @@index([integrationId])
+  @@index([status])
+  @@index([startedAt])
+}
